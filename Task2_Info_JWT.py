@@ -34,6 +34,39 @@ app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "supersecretkey")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=int(os.getenv("JWT_EXPIRY_MINUTES", 10)))
 jwt = JWTManager(app)
 
+# After defining jwt
+@jwt.token_in_blocklist_loader
+def check_if_token_in_blocklist(jwt_header, jwt_payload):
+    """
+    Check if the JWT token is in the blocklist.
+    This prevents logged-out users from using old tokens.
+    """
+    return TokenBlocklist.query.filter_by(jti=jwt_payload["jti"]).first() is not None
+
+# Logout route - Adds the token to the blocklist
+@app.route("/logout", methods=["POST"])
+@jwt_required()
+def logout():
+    """
+    Logs out the user by adding the JWT token to the blocklist.
+    """
+    jti = get_jwt()["jti"]  # Extract the token's unique identifier (JTI)
+    db.session.add(TokenBlocklist(jti=jti))
+    db.session.commit()
+    return jsonify({"message": "Successfully logged out!"}), 200
+
+# Token refresh route
+@app.route("/refresh", methods=["POST"])
+@jwt_required(refresh=True)
+def refresh():
+    """
+    Generates a new access token using a valid refresh token.
+    """
+    identity = get_jwt_identity()
+    new_access_token = create_access_token(identity=identity)
+    return jsonify({"access_token": new_access_token}), 200
+
+
 # Models
 class User(db.Model):
     __tablename__ = "users"
