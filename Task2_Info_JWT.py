@@ -1,193 +1,176 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, request, jsonify, Blueprint
+from flask_mysqldb import MySQL
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import bcrypt
-import os
-from flask_jwt_extended import (
-    JWTManager, create_access_token, jwt_required,
-    get_jwt_identity, get_jwt, create_refresh_token
-)
+from datetime import timedelta
 from dotenv import load_dotenv
-from flask_migrate import Migrate
-from flask_cors import CORS
-from datetime import datetime, timedelta
+import os
 
-# Load environment variables
 load_dotenv()
 
+
+
+
+#
 app = Flask(__name__)
-CORS(app)
 
-# Database configuration
-app.config["SQLALCHEMY_DATABASE_URI"] = (
-    f"mysql+mysqlconnector://{os.getenv('DB_USER', 'root')}:"
-    f"{os.getenv('DB_PASSWORD', '')}@{os.getenv('DB_HOST', '127.0.0.1')}/"
-    f"{os.getenv('DB_NAME', 'store_db')}"
-)
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# Set MySQL
+app.config['MYSQL_HOST'] = 'localhost'
+app.config['MYSQL_USER'] = 'root'
+app.config['MYSQL_PASSWORD'] = ''
+app.config['MYSQL_DB'] = 'task_db'
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=10)
 
-# Initialize database
-db = SQLAlchemy(app)
-migrate = Migrate(app, db)
 
-# JWT Configuration
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "supersecretkey")
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=int(os.getenv("JWT_EXPIRY_MINUTES", 10)))
+
+# Set JWT
+app.config['JWT_SECRET_KEY'] = 'your_secret_key_here'
+
+# Set MySQL و JWT
+mysql = MySQL(app)
 jwt = JWTManager(app)
 
-# After defining jwt
-@jwt.token_in_blocklist_loader
-def check_if_token_in_blocklist(jwt_header, jwt_payload):
-    """
-    Check if the JWT token is in the blocklist.
-    This prevents logged-out users from using old tokens.
-    """
-    return TokenBlocklist.query.filter_by(jti=jwt_payload["jti"]).first() is not None
+# Blueprint For Authentication
+auth_bp = Blueprint('auth', __name__)
 
-# Logout route - Adds the token to the blocklist
-@app.route("/logout", methods=["POST"])
-@jwt_required()
-def logout():
-    """
-    Logs out the user by adding the JWT token to the blocklist.
-    """
-    jti = get_jwt()["jti"]  # Extract the token's unique identifier (JTI)
-    db.session.add(TokenBlocklist(jti=jti))
-    db.session.commit()
-    return jsonify({"message": "Successfully logged out!"}), 200
-
-# Token refresh route
-@app.route("/refresh", methods=["POST"])
-@jwt_required(refresh=True)
-def refresh():
-    """
-    Generates a new access token using a valid refresh token.
-    """
-    identity = get_jwt_identity()
-    new_access_token = create_access_token(identity=identity)
-    return jsonify({"access_token": new_access_token}), 200
-
-
-# Models
-class User(db.Model):
-    __tablename__ = "users"
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    username = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(255), nullable=False)
-    is_admin = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-class Product(db.Model):
-    __tablename__ = "products"
-    pid = db.Column(db.Integer, primary_key=True)
-    pname = db.Column(db.String(100), unique=True, nullable=False)
-    description = db.Column(db.Text, default="")
-    price = db.Column(db.Numeric(10, 2), nullable=False)
-    stock = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-class TokenBlocklist(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    jti = db.Column(db.String(36), nullable=False, unique=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-# Authentication Routes(Signup)
-@app.route("/signup", methods=["POST"])
+#Signup
+@auth_bp.route('/signup', methods=['POST'])
 def signup():
-    data = request.get_json()
-    hashed_password = bcrypt.hashpw(data["password"].encode("utf-8"), bcrypt.gensalt())
-    new_user = User(name=data["name"], username=data["username"], password=hashed_password.decode("utf-8"))
-    db.session.add(new_user)
-    db.session.commit()
-    return jsonify({"message": "User registered successfully!"}), 201
-    
-#Login
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    user = User.query.filter_by(username=data["username"]).first()
-    if user and bcrypt.checkpw(data["password"].encode("utf-8"), user.password.encode("utf-8")):
-        access_token = create_access_token(identity=user.id)
-        return jsonify({"access_token": access_token}), 200
-    return jsonify({"message": "Invalid credentials!"}), 401
+    data = request.json
+    hashed_pw = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-# User Update Route (Protected)
-@app.route("/users/<int:id>", methods=["PUT"])
+
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT id FROM users WHERE username = %s", (data['username'],))
+    existing_user = cursor.fetchone()
+
+    if existing_user:
+        return jsonify({'message': 'Username already exists'}), 400
+
+    cursor.execute("INSERT INTO users (name, username, password) VALUES (%s, %s, %s)",
+                   (data['name'], data['username'], hashed_pw))
+    mysql.connection.commit()
+    cursor.close()
+    return jsonify({'message': 'User registered successfully'}), 201
+
+#Login
+@auth_bp.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT id, password FROM users WHERE username = %s", (data['username'],))
+    user = cursor.fetchone()
+    cursor.close()
+
+    if user and bcrypt.checkpw(data['password'].encode('utf-8'), user[1].encode()):
+
+        token = create_access_token(identity=str(user[0]))
+        return jsonify({'token': token}), 200
+
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+#Update user by id
+@auth_bp.route('/users/<int:id>', methods=['PUT'])
 @jwt_required()
 def update_user(id):
-    data = request.get_json()
-    user = User.query.get(id)
-    if not user:
-        return jsonify({"message": "User not found"}), 404
-    if "name" in data:
-        user.name = data["name"]
-    db.session.commit()
-    return jsonify({"message": "User updated successfully"})
+    current_user = get_jwt_identity()
+    if str(current_user) != str(id):
+        return jsonify({'message': 'Unauthorized'}), 403
 
-# Product Routes (Require JWT).. Add a new product
-@app.route("/products", methods=["POST"])
+    data = request.json
+
+    if 'password' in data:
+        return jsonify({'message': 'Cannot change password here'}), 400
+
+    cursor = mysql.connection.cursor()
+    cursor.execute("UPDATE users SET name = %s, username = %s WHERE id = %s",
+                   (data['name'], data['username'], id))
+    mysql.connection.commit()
+    cursor.close()
+    return jsonify({'message': 'User updated successfully'}), 200
+
+
+
+
+# Blueprint
+product_bp = Blueprint('product', __name__)
+
+#Add a product
+@product_bp.route('/products', methods=['POST'])
 @jwt_required()
 def add_product():
-    data = request.get_json()
-    new_product = Product(
-        pname=data["pname"], description=data.get("description", ""),
-        price=data["price"], stock=data["stock"]
-    )
-    db.session.add(new_product)
-    db.session.commit()
-    return jsonify({"message": "Product added successfully!"}), 201
+    data = request.json
+    cursor = mysql.connection.cursor()
+    cursor.execute("INSERT INTO products (pname, description, price, stock, created_at) VALUES (%s, %s, %s, %s, NOW())",
+               (data['pname'], data['description'], data['price'], data['stock']))
 
-#Retrieve product
-@app.route("/products", methods=["GET"])
-@jwt_required()
+    mysql.connection.commit()
+    cursor.close()
+    return jsonify({'message': 'Product added successfully'}), 201
+
+#Get all products
+@product_bp.route('/products', methods=['GET'])
 def get_products():
-    products = Product.query.all()
-    return jsonify([{ "pid": p.pid, "pname": p.pname, "price": float(p.price), "stock": p.stock } for p in products])
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT * FROM products")
+    products = cursor.fetchall()
+    cursor.close()
+    product_list = []
+    for product in products:
+        product_list.append({
+            'pid': product[0],
+            'pname': product[1],
+            'description': product[2],
+            'price': product[3],
+            'stock': product[4],
+            'created_at': product[5].strftime('%Y-%m-%d %H:%M:%S')
+        })
+    return jsonify(product_list)
 
-#Retrieve products
-@app.route("/products/<int:pid>", methods=["GET"])
-@jwt_required()
+#Get a product
+@product_bp.route('/products/<int:pid>', methods=['GET'])
 def get_product(pid):
-    product = Product.query.get(pid)
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT * FROM products WHERE pid = %s", (pid,))
+    product = cursor.fetchone()
+    cursor.close()
     if not product:
-        return jsonify({"message": "Product not found"}), 404
-    return jsonify({ "pid": product.pid, "pname": product.pname, "price": float(product.price), "stock": product.stock })
-    
-#Update product
-@app.route("/products/<int:pid>", methods=["PUT"])
+        return jsonify({'message': 'Product not found'}), 404
+    return jsonify({
+        'pid': product[0],
+        'pname': product[1],
+        'description': product[2],
+        'price': product[3],
+        'stock': product[4],
+        'created_at': product[5].strftime('%Y-%m-%d %H:%M:%S')
+    })
+
+#Update a product
+@product_bp.route('/products/<int:pid>', methods=['PUT'])
 @jwt_required()
 def update_product(pid):
-    data = request.get_json()
-    product = Product.query.get(pid)
-    if not product:
-        return jsonify({"message": "Product not found"}), 404
-    if "pname" in data:
-        product.pname = data["pname"]
-    if "description" in data:
-        product.description = data["description"]
-    if "price" in data:
-        product.price = data["price"]
-    if "stock" in data:
-        product.stock = data["stock"]
-    db.session.commit()
-    return jsonify({"message": "Product updated successfully!"})
-    
-#Delete product
-@app.route("/products/<int:pid>", methods=["DELETE"])
+    data = request.json
+    cursor = mysql.connection.cursor()
+    cursor.execute("UPDATE products SET pname = %s, description = %s, price = %s, stock = %s WHERE pid = %s",
+                   (data['pname'], data['description'], data['price'], data['stock'], pid))
+    mysql.connection.commit()
+    cursor.close()
+    return jsonify({'message': 'Product updated successfully'}), 200
+
+#Delete a product
+@product_bp.route('/products/<int:pid>', methods=['DELETE'])
 @jwt_required()
 def delete_product(pid):
-    product = Product.query.get(pid)
-    if not product:
-        return jsonify({"message": "Product not found"}), 404
-    db.session.delete(product)
-    db.session.commit()
-    return jsonify({"message": "Product deleted successfully!"})
+    cursor = mysql.connection.cursor()
+    cursor.execute("DELETE FROM products WHERE pid = %s", (pid,))
+    mysql.connection.commit()
+    cursor.close()
+    return jsonify({'message': 'Product deleted successfully'}), 200
 
-@app.route("/")
-def home():
-    return jsonify({"message": "API is running!"})
+#
+app.register_blueprint(auth_bp)
+app.register_blueprint(product_bp)
 
+# Activate app
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0") 
+    app.run(debug=True)
